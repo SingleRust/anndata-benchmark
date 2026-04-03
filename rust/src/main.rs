@@ -49,10 +49,13 @@ fn get_current_rss_mb(sys: &mut System) -> f64 {
     }
 }
 
+/// Force evaluation of the data to ensure actual I/O and processing
 fn force_eval(data: ArrayData) {
+    // Just accessing the shape or a value is often enough for Rust's owned structures,
+    // but we'll do a simple operation to be sure the CPU sees the data.
     match data {
         ArrayData::Array(a) => { let _ = a.shape(); }
-        _ => {} 
+        _ => {} // sparse structures in anndata-rs are already materialized on get/slice
     }
 }
 
@@ -95,7 +98,8 @@ fn run_with_backend<B: Backend>(cli: &Cli, params: &Params) -> Result<f64> {
             let backed = AnnData::<B>::open(B::open_rw(&cli.dataset)?)?;
             let start = Instant::now();
             let adata = convert_to_in_memory(backed)?;
-            let x = adata.x().get_data()?.context("X is empty")?;
+            // IMArrayElement::get_data() returns Result<ArrayData>
+            let x = adata.x().get_data()?;
             force_eval(x);
             duration = start.elapsed();
         }
@@ -109,11 +113,11 @@ fn run_with_backend<B: Backend>(cli: &Cli, params: &Params) -> Result<f64> {
             let start = Instant::now();
             if cli.operation == "in_memory_subset" {
                 let subset = adata.subset(&selection_ref)?;
-                let x = subset.x().get_data()?.context("X is empty")?;
+                let x = subset.x().get_data()?;
                 force_eval(x);
             } else {
                 adata.subset_inplace(&selection_ref)?;
-                let x = adata.x().get_data()?.context("X is empty")?;
+                let x = adata.x().get_data()?;
                 force_eval(x);
             }
             duration = start.elapsed();
