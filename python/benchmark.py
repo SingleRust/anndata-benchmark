@@ -1,5 +1,6 @@
 import anndata as ad
 import numpy as np
+import scipy.sparse as sp
 import time
 import psutil
 import os
@@ -13,46 +14,46 @@ def get_memory_usage():
 
 def run_benchmark(dataset_path, operation, params=None):
     initial_mem = get_memory_usage()
-    
-    # We want to measure the duration of the core operation
     duration = 0
     
     if operation == "backed_read_full":
-        adata = ad.read_h5ad(dataset_path) if dataset_path.endswith('.h5ad') else ad.read_zarr(dataset_path)
+        # Force backed mode to test I/O
+        adata = ad.read_h5ad(dataset_path, backed='r') if dataset_path.endswith('.h5ad') else ad.read_zarr(dataset_path)
         start_time = time.time()
-        _ = adata.X[:]
+        X = adata.X[:]
+        _ = X.sum() # Force materialization
         duration = time.time() - start_time
         
     elif operation == "backed_subset_rows":
-        # Ensure we use backed mode for Python if we want to test I/O
         adata = ad.read_h5ad(dataset_path, backed='r') if dataset_path.endswith('.h5ad') else ad.read_zarr(dataset_path)
         row_fraction = params.get('row_fraction', 0.1)
         n_rows = int(adata.n_obs * row_fraction)
         start_time = time.time()
-        _ = adata.X[:n_rows, :]
+        X_sub = adata.X[:n_rows, :]
+        _ = X_sub.sum() # Force materialization
         duration = time.time() - start_time
         
     elif operation == "memory_load":
         start_time = time.time()
         adata = ad.read_h5ad(dataset_path) if dataset_path.endswith('.h5ad') else ad.read_zarr(dataset_path)
-        # Ensure data is actually loaded
-        _ = adata.X
+        _ = adata.X.sum() # Force load
         duration = time.time() - start_time
         
     elif operation in ["in_memory_subset", "in_memory_subset_inplace"]:
-        # Pre-load into memory (setup not timed)
+        # Pre-load (not timed)
         adata = ad.read_h5ad(dataset_path) if dataset_path.endswith('.h5ad') else ad.read_zarr(dataset_path)
         row_fraction = params.get('row_fraction', 0.1)
         n_rows = int(adata.n_obs * row_fraction)
         
         start_time = time.time()
         if operation == "in_memory_subset":
-            _ = adata[:n_rows, :].copy()
+            X_sub = adata[:n_rows, :].copy()
+            _ = X_sub.X.sum()
         else:
-            # Simulate true in-place memory reduction:
-            # Python must allocate a new copy, overwrite the reference, and force GC
+            # Simulated in-place
             adata = adata[:n_rows, :].copy()
             gc.collect()
+            _ = adata.X.sum()
         duration = time.time() - start_time
     
     peak_mem = get_memory_usage()

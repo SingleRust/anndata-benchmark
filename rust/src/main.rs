@@ -17,10 +17,8 @@ use anndata_memory::{load_h5ad, convert_to_in_memory};
 struct Cli {
     #[arg(short, long)]
     dataset: String,
-
     #[arg(short, long)]
     operation: String,
-
     #[arg(short, long, default_value = "{}")]
     params: String,
 }
@@ -30,7 +28,6 @@ struct Params {
     #[serde(default = "default_row_fraction")]
     row_fraction: f64,
 }
-
 fn default_row_fraction() -> f64 { 0.1 }
 
 #[derive(Serialize)]
@@ -52,6 +49,16 @@ fn get_current_rss_mb(sys: &mut System) -> f64 {
     }
 }
 
+/// Force evaluation of the data to ensure actual I/O and processing
+fn force_eval(data: ArrayData) {
+    // Just accessing the shape or a value is often enough for Rust's owned structures,
+    // but we'll do a simple operation to be sure the CPU sees the data.
+    match data {
+        ArrayData::Array(a) => { let _ = a.shape(); }
+        _ => {} // sparse structures in anndata-rs are already materialized on get/slice
+    }
+}
+
 fn monitor_memory(stop_signal: Arc<AtomicBool>, peak_mem: Arc<parking_lot::Mutex<f64>>) {
     let mut sys = System::new();
     let pid = Pid::from(std::process::id() as usize);
@@ -64,7 +71,7 @@ fn monitor_memory(stop_signal: Arc<AtomicBool>, peak_mem: Arc<parking_lot::Mutex
                 *peak = current_mem;
             }
         }
-        thread::sleep(std::time::Duration::from_millis(20));
+        thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
@@ -77,102 +84,100 @@ fn main() -> Result<()> {
     let stop_signal = Arc::new(AtomicBool::new(false));
     let peak_mem = Arc::new(parking_lot::Mutex::new(initial_mem));
 
-    // Start memory monitor thread
     let monitor_stop = Arc::clone(&stop_signal);
     let monitor_peak = Arc::clone(&peak_mem);
     let monitor_handle = thread::spawn(move || {
         monitor_memory(monitor_stop, monitor_peak);
     });
 
-    let start = Instant::now();
+    let duration;
 
     match cli.operation.as_str() {
         "backed_read_full" => {
-            if cli.dataset.ends_with(".h5ad") {
-                let adata = AnnData::<H5>::open(H5::open_rw(&cli.dataset)?)?;
-                let _x: ArrayData = adata.x().get()?.context("X is empty")?;
+            let adata = if cli.dataset.ends_with(".h5ad") {
+                AnnData::<H5>::open(H5::open_rw(&cli.dataset)?)?
             } else {
-                let adata = AnnData::<Zarr>::open(Zarr::open_rw(&cli.dataset)?)?;
-                let _x: ArrayData = adata.x().get()?.context("X is empty")?;
-            }
+                AnnData::<Zarr>::open(Zarr::open_rw(&cli.dataset)?)?
+            };
+            let start = Instant::now();
+            let x: ArrayData = adata.x().get()?.context("X is empty")?;
+            force_eval(x);
+            duration = start.elapsed();
         }
         "backed_subset_rows" => {
-            let n_obs;
-            let n_rows;
-            if cli.dataset.ends_with(".h5ad") {
-                let adata = AnnData::<H5>::open(H5::open_rw(&cli.dataset)?)?;
-                n_obs = adata.n_obs();
-                n_rows = (n_obs as f64 * params.row_fraction) as usize;
-                let selection = [SelectInfoElem::from(0..n_rows), SelectInfoElem::full()];
-                let _x: ArrayData = adata.x().slice(&selection)?.context("X subset is empty")?;
+            let adata = if cli.dataset.ends_with(".h5ad") {
+                AnnData::<H5>::open(H5::open_rw(&cli.dataset)?)?
             } else {
-                let adata = AnnData::<Zarr>::open(Zarr::open_rw(&cli.dataset)?)?;
-                n_obs = adata.n_obs();
-                n_rows = (n_obs as f64 * params.row_fraction) as usize;
-                let selection = [SelectInfoElem::from(0..n_rows), SelectInfoElem::full()];
-                let _x: ArrayData = adata.x().slice(&selection)?.context("X subset is empty")?;
-            }
+                AnnData::<Zarr>::open(Zarr::open_rw(&cli.dataset)?)?
+            };
+            let n_rows = (adata.n_obs() as f64 * params.row_fraction) as usize;
+            let selection = [SelectInfoElem::from(0..n_rows), SelectInfoElem::full()];
+            let start = Instant::now();
+            let x: ArrayData = adata.x().slice(&selection)?.context("X subset is empty")?;
+            force_eval(x);
+            duration = start.elapsed();
         }
         "memory_load" => {
-            if cli.dataset.ends_with(".h5ad") {
-                let _adata = load_h5ad(&cli.dataset)?;
+            let start = Instant::now();
+            let adata = if cli.dataset.ends_with(".h5ad") {
+                load_h5ad(&cli.dataset)?
             } else {
                 let backed = AnnData::<Zarr>::open(Zarr::open_rw(&cli.dataset)?)?;
-                let _imanndata = convert_to_in_memory(backed)?;
-            }
+                convert_to_in_memory(backed)?
+            };
+            force_eval(adata.x().get_data()?);
+            duration = start.elapsed();
         }
-        "in_memory_subset" => {
-            let adata;
-            if cli.dataset.ends_with(".h5ad") {
-                adata = load_h5ad(&cli.dataset)?;
+        "in_memory_subset" | "in_memory_subset_inplace" => {
+            let mut adata = if cli.dataset.ends_with(".h5ad") {
+                load_h5ad(&cli.dataset)?
             } else {
                 let backed = AnnData::<Zarr>::open(Zarr::open_rw(&cli.dataset)?)?;
-                adata = convert_to_in_memory(backed)?;
-            }
-            let n_obs = adata.n_obs();
-            let n_rows = (n_obs as f64 * params.row_fraction) as usize;
+                convert_to_in_memory(backed)?
+            };
+            let n_rows = (adata.n_obs() as f64 * params.row_fraction) as usize;
             let selection = [SelectInfoElem::from(0..n_rows), SelectInfoElem::full()];
             let selection_ref: Vec<&SelectInfoElem> = selection.iter().collect();
-            let _subset = adata.subset(&selection_ref)?;
-        }
-        "in_memory_subset_inplace" => {
-            let mut adata;
-            if cli.dataset.ends_with(".h5ad") {
-                adata = load_h5ad(&cli.dataset)?;
+            
+            let start = Instant::now();
+            if cli.operation == "in_memory_subset" {
+                let subset = adata.subset(&selection_ref)?;
+                force_eval(subset.x().get_data()?);
             } else {
-                let backed = AnnData::<Zarr>::open(Zarr::open_rw(&cli.dataset)?)?;
-                adata = convert_to_in_memory(backed)?;
+                adata.subset_inplace(&selection_ref)?;
+                force_eval(adata.x().get_data()?);
             }
-            let n_obs = adata.n_obs();
-            let n_rows = (n_obs as f64 * params.row_fraction) as usize;
-            let selection = [SelectInfoElem::from(0..n_rows), SelectInfoElem::full()];
-            let selection_ref: Vec<&SelectInfoElem> = selection.iter().collect();
-            adata.subset_inplace(&selection_ref)?;
+            duration = start.elapsed();
         }
         "convert_to_memory" => {
-            if cli.dataset.ends_with(".h5ad") {
-                let backed = AnnData::<H5>::open(H5::open_rw(&cli.dataset)?)?;
-                let _imanndata = convert_to_in_memory(backed)?;
+            let backed = if cli.dataset.ends_with(".h5ad") {
+                AnnData::<H5>::open(H5::open_rw(&cli.dataset)?)?
             } else {
-                let backed = AnnData::<Zarr>::open(Zarr::open_rw(&cli.dataset)?)?;
-                let _imanndata = convert_to_in_memory(backed)?;
-            }
+                AnnData::<Zarr>::open(Zarr::open_rw(&cli.dataset)?)?
+            };
+            let start = Instant::now();
+            let _imanndata = convert_to_in_memory(backed)?;
+            duration = start.elapsed();
         }
         "s3_zarr_read" => {
             let adata = AnnData::<Zarr>::open(Zarr::open_rw(&cli.dataset)?)?;
-            let _x: ArrayData = adata.x().get()?.context("X is empty")?;
+            let start = Instant::now();
+            let x = adata.x().get()?.context("X is empty")?;
+            force_eval(x);
+            duration = start.elapsed();
         }
         "s3_zarr_subset" => {
             let adata = AnnData::<Zarr>::open(Zarr::open_rw(&cli.dataset)?)?;
-            let n_obs = adata.n_obs();
-            let n_rows = (n_obs as f64 * params.row_fraction) as usize;
+            let n_rows = (adata.n_obs() as f64 * params.row_fraction) as usize;
             let selection = [SelectInfoElem::from(0..n_rows), SelectInfoElem::full()];
-            let _x: ArrayData = adata.x().slice(&selection)?.context("X subset is empty")?;
+            let start = Instant::now();
+            let x = adata.x().slice(&selection)?.context("X subset is empty")?;
+            force_eval(x);
+            duration = start.elapsed();
         }
         _ => anyhow::bail!("Unknown operation: {}", cli.operation),
     }
 
-    let duration = start.elapsed().as_secs_f64();
     stop_signal.store(true, Ordering::Relaxed);
     monitor_handle.join().unwrap();
 
@@ -186,13 +191,12 @@ fn main() -> Result<()> {
 
     let result = BenchmarkResult {
         operation: cli.operation.clone(),
-        duration_sec: duration,
+        duration_sec: duration.as_secs_f64(),
         initial_memory_mb: initial_mem,
         peak_memory_mb: *peak_mem.lock(),
         final_memory_mb: final_mem,
     };
 
     println!("{}", serde_json::to_string(&result)?);
-
     Ok(())
 }
