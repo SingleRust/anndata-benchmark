@@ -1,0 +1,25 @@
+[workspace]
+authors = ["ian <ian@crimelabs.dev>"]
+channels = ["conda-forge"]
+name = "anndata-test"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[dependencies]
+python = ">=3.10"
+anndata = ">=0.10"
+zarr = ">=2.16"
+h5py = ">=3.10"
+pandas = ">=2.0"
+numpy = ">=1.24"
+psutil = ">=5.9"
+pyyaml = ">=6.0"
+s3fs = ">=2023.10"
+scipy = ">=1.11"
+boto3 = ">=1.28"
+
+[tasks]
+generate-data = "python python/generate_data.py"
+benchmark-python = "python python/benchmark.py"
+benchmark-rust = "cargo run --release --manifest-path rust/Cargo.toml --"
+run-all = "python run_benchmarks.py"

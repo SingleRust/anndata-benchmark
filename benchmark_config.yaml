@@ -1,0 +1,40 @@
+# Benchmark Configuration
+
+datasets:
+  - name: "small_sparse"
+    n_obs: 1000
+    n_vars: 500
+    sparsity: 0.01
+    formats: ["h5ad", "zarr"]
+  - name: "medium_sparse"
+    n_obs: 10000
+    n_vars: 2000
+    sparsity: 0.05
+    formats: ["h5ad", "zarr"]
+
+operations:
+  - name: "backed_read_full"
+    description: "Read the entire X matrix from a backed file into memory"
+  - name: "backed_subset_rows"
+    description: "Read a slice of rows (e.g., first 10%) from a backed file"
+    params:
+      row_fraction: 0.1
+  - name: "memory_load"
+    description: "Directly load file into in-memory structure"
+  - name: "in_memory_subset"
+    description: "Perform subsetting on an already loaded in-memory object (Copy)"
+    params:
+      row_fraction: 0.1
+  - name: "in_memory_subset_inplace"
+    description: "Perform subsetting on an already loaded in-memory object (In-Place)"
+    params:
+      row_fraction: 0.1
+
+# S3 Configuration
+s3:
+  enabled: false
+  bucket: "your-bucket-name"
+  region: "us-east-1"
+  access_key_id: "YOUR_ACCESS_KEY"
+  secret_access_key: "YOUR_SECRET_KEY"
+  endpoint: "https://s3.amazonaws.com"
