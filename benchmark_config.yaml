@@ -11,6 +11,11 @@ datasets:
     n_vars: 2000
     sparsity: 0.05
     formats: ["h5ad", "zarr"]
+  - name: "large_sparse"
+    n_obs: 100000
+    n_vars: 20000
+    sparsity: 0.05
+    formats: ["h5ad", "zarr"]
 
 operations:
   - name: "backed_read_full"
